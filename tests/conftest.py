@@ -208,9 +208,14 @@ def output_strs():
     ]
 
 
+# @pytest.fixture
+# def model_id():
+#     return "/data/a5-alignment/models/Qwen2.5-Math-1.5B"
+
 @pytest.fixture
 def model_id():
-    return "/data/a5-alignment/models/Qwen2.5-Math-1.5B"
+    # Change this from the hardcoded path to the model name
+    return "Qwen/Qwen2.5-Math-1.5B"
 
 
 @pytest.fixture
