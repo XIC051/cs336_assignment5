@@ -55,9 +55,15 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     """
     torch.Tensor Shape (batch_size, sequence_length). The entropy for each next-token prediction.
     """
-    log_probs = F.log_softmax(logits, dim=-1)
+    log_probs = F.log_softmax(logits, dim=-1) ## shape same as logits: [batch x sequence_len x vocab_size]
     probs = torch.exp(log_probs)
-    entropy = -torch.sum(probs * log_probs, dim=-1)
+    
+    # Calculate p * log(p)
+    p_log_p = probs * log_probs
+    # FIX: Replace NaNs (caused by 0 * -inf) with 0.0
+    # This enforces the limit: lim(p->0) p*log(p) = 0
+    p_log_p = torch.nan_to_num(p_log_p, nan=0.0)
+    entropy = -torch.sum(p_log_p, dim=-1)
     return entropy
 
 

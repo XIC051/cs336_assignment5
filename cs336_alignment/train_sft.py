@@ -133,9 +133,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max_steps", type=int, default=-1)
     parser.add_argument("--eval_every", type=int, default=50)
+    parser.add_argument("--eval_subset_size", type=int, default=100)
     parser.add_argument("--warmup_steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--project_name", type=str, default="gsm8k-sft")
+    parser.add_argument("--output_dir", type=str, default="outputs/sft")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -160,9 +162,11 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_id, 
+        args.model_id,
         torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
     ).to(device)
+    model.config.use_cache = False
 
     # Load and format data
     train_raw = load_gsm8k(args.train_path)
@@ -185,6 +189,9 @@ def main():
     if args.num_examples > 0 and args.num_examples < len(formatted_train):
         formatted_train = random.sample(formatted_train, args.num_examples)
         logger.info(f"Using {len(formatted_train)} unique examples for SFT")
+
+    if args.batch_size % args.micro_batch_size != 0:
+        raise ValueError("batch_size must be divisible by micro_batch_size")
 
     train_dataset = SFTDataset(formatted_train, tokenizer)
     train_dataloader = DataLoader(
@@ -228,9 +235,8 @@ def main():
             out = get_response_log_probs(model, input_ids, labels)
             policy_log_probs = out["log_probs"]
             
-            # Normalize constant should be the total number of response tokens in the FULL batch
-            # For simplicity, we use the microbatch response token count.
-            normalize_constant = response_mask.sum().item()
+            # Normalize by average response tokens per example in the global batch.
+            normalize_constant = response_mask.sum().item() / response_mask.shape[0]
             if normalize_constant == 0:
                 continue
                 
@@ -260,7 +266,8 @@ def main():
                     logger.info(f"Evaluating at step {global_step}...")
                     model.eval()
                     # Evaluate on a subset of test set for speed during training
-                    evaluate_vllm_local(model, vllm_instance, formatted_test[:100], global_step)
+                    eval_subset = formatted_test[: args.eval_subset_size]
+                    evaluate_vllm_local(model, vllm_instance, eval_subset, global_step)
                     model.train()
                 
                 if args.max_steps > 0 and global_step >= args.max_steps:
@@ -273,6 +280,12 @@ def main():
     model.eval()
     evaluate_vllm_local(model, vllm_instance, formatted_test, global_step)
     
+    size_tag = "full" if args.num_examples <= 0 or args.num_examples >= len(train_raw) else str(args.num_examples)
+    output_dir = os.path.join(args.output_dir, size_tag)
+    os.makedirs(output_dir, exist_ok=True)
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
     wandb.finish()
 
 if __name__ == "__main__":
