@@ -142,6 +142,42 @@ def sft_microbatch_train_step(
     return loss.detach(), metadata
 
 
+def generate_responses(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    prompts: list[str],
+    device: torch.device | str,
+    **generation_kwargs,
+) -> list[str]:
+    """
+    Generate responses for a list of prompts.
+    
+    Args:
+        model: The model to use for generation
+        tokenizer: The tokenizer to use
+        prompts: List of prompt strings
+        device: Device to run generation on
+        **generation_kwargs: Additional kwargs for model.generate() (e.g., max_new_tokens, temperature)
+    
+    Returns:
+        List of generated response strings
+    """
+    model.eval()
+    responses = []
+    
+    for prompt in prompts:
+        inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+        
+        with torch.no_grad():
+            output_ids = model.generate(**inputs, **generation_kwargs)
+            prompt_len = inputs.input_ids.shape[1]
+            generated_ids = output_ids[:, prompt_len:]
+            response_str = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+            responses.append(response_str)
+    
+    return responses
+
+
 def log_generations(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
@@ -152,56 +188,49 @@ def log_generations(
     **generation_kwargs,
 ):
     """
-    Log generations from the model for a set of prompts.
+    Log generations from the model for a set of prompts with detailed analysis.
     """
-    model.eval()
-    results = []
     logger = logging.getLogger(__name__)
+    
+    # Generate all responses using the helper
+    responses = generate_responses(model, tokenizer, prompts, device, **generation_kwargs)
+    
+    # Analyze each response
+    results = []
+    for prompt, response_str, gt in zip(prompts, responses, ground_truths):
+        # Get reward info
+        reward_info = reward_fn(response_str, gt)
 
-    for prompt, gt in zip(prompts, ground_truths):
-        inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+        # Calculate entropy and length using the helpers
+        tokenized = tokenize_prompt_and_output([prompt], [response_str], tokenizer)
+        for k, v in tokenized.items():
+            tokenized[k] = v.to(device)
 
-        with torch.no_grad():
-            # Generate response
-            output_ids = model.generate(**inputs, **generation_kwargs)
-            # Get only the generated part
-            prompt_len = inputs.input_ids.shape[1]
-            generated_ids = output_ids[:, prompt_len:]
-            response_str = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+        # get_response_log_probs will return log_probs and token_entropy
+        # on the labels (which are the response tokens shifted)
+        out = get_response_log_probs(
+            model,
+            tokenized["input_ids"],
+            tokenized["labels"],
+            return_token_entropy=True
+        )
 
-            # Get reward info
-            reward_info = reward_fn(response_str, gt)
+        resp_mask = tokenized["response_mask"]  # (1, L)
+        token_entropy = out["token_entropy"]  # (1, L)
 
-            # Calculate entropy and length using the helpers
-            tokenized = tokenize_prompt_and_output([prompt], [response_str], tokenizer)
-            for k, v in tokenized.items():
-                tokenized[k] = v.to(device)
+        # Average entropy over response tokens only
+        avg_entropy = (token_entropy * resp_mask).sum() / resp_mask.sum()
+        response_len = resp_mask.sum().item()
 
-            # get_response_log_probs will return log_probs and token_entropy
-            # on the labels (which are the response tokens shifted)
-            out = get_response_log_probs(
-                model,
-                tokenized["input_ids"],
-                tokenized["labels"],
-                return_token_entropy=True
-            )
-
-            resp_mask = tokenized["response_mask"]  # (1, L)
-            token_entropy = out["token_entropy"]  # (1, L)
-
-            # Average entropy over response tokens only
-            avg_entropy = (token_entropy * resp_mask).sum() / resp_mask.sum()
-            response_len = resp_mask.sum().item()
-
-            results.append({
-                "prompt": prompt,
-                "response": response_str,
-                "ground_truth": gt,
-                "reward_info": reward_info,
-                "avg_entropy": avg_entropy.item(),
-                "length": response_len,
-                "is_correct": reward_info.get("reward", 0.0) > 0.5
-            })
+        results.append({
+            "prompt": prompt,
+            "response": response_str,
+            "ground_truth": gt,
+            "reward_info": reward_info,
+            "avg_entropy": avg_entropy.item(),
+            "length": response_len,
+            "is_correct": reward_info.get("reward", 0.0) > 0.5
+        })
 
     # Stats calculation
     total_len = sum(r["length"] for r in results)

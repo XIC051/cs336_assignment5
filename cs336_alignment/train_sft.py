@@ -15,7 +15,8 @@ from torch.utils.data import DataLoader, Dataset
 from cs336_alignment.sft_helper import (
     tokenize_prompt_and_output,
     get_response_log_probs,
-    sft_microbatch_train_step
+    sft_microbatch_train_step,
+    log_generations
 )
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 
@@ -134,6 +135,9 @@ def main():
     parser.add_argument("--max_steps", type=int, default=-1)
     parser.add_argument("--eval_every", type=int, default=50)
     parser.add_argument("--eval_subset_size", type=int, default=100)
+    parser.add_argument("--log_generations_every", type=int, default=0)
+    parser.add_argument("--log_generations_count", type=int, default=5)
+    parser.add_argument("--log_generations_max_new_tokens", type=int, default=256)
     parser.add_argument("--warmup_steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--project_name", type=str, default="gsm8k-sft")
@@ -268,6 +272,20 @@ def main():
                     # Evaluate on a subset of test set for speed during training
                     eval_subset = formatted_test[: args.eval_subset_size]
                     evaluate_vllm_local(model, vllm_instance, eval_subset, global_step)
+                    if args.log_generations_every > 0 and global_step % args.log_generations_every == 0:
+                        log_subset = formatted_test[: args.log_generations_count]
+                        log_generations(
+                            model=model,
+                            tokenizer=tokenizer,
+                            prompts=[ex["prompt"] for ex in log_subset],
+                            ground_truths=[ex["original_answer"] for ex in log_subset],
+                            reward_fn=r1_zero_reward_fn,
+                            device=device,
+                            max_new_tokens=args.log_generations_max_new_tokens,
+                            temperature=0.0,
+                            do_sample=False,
+                            pad_token_id=tokenizer.pad_token_id,
+                        )
                     model.train()
                 
                 if args.max_steps > 0 and global_step >= args.max_steps:
@@ -279,6 +297,20 @@ def main():
     logger.info("Final evaluation...")
     model.eval()
     evaluate_vllm_local(model, vllm_instance, formatted_test, global_step)
+    if args.log_generations_count > 0:
+        log_subset = formatted_test[: args.log_generations_count]
+        log_generations(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=[ex["prompt"] for ex in log_subset],
+            ground_truths=[ex["original_answer"] for ex in log_subset],
+            reward_fn=r1_zero_reward_fn,
+            device=device,
+            max_new_tokens=args.log_generations_max_new_tokens,
+            temperature=0.0,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+        )
     
     size_tag = "full" if args.num_examples <= 0 or args.num_examples >= len(train_raw) else str(args.num_examples)
     output_dir = os.path.join(args.output_dir, size_tag)

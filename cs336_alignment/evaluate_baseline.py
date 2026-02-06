@@ -13,7 +13,7 @@ def evaluate_vllm(
     ground_truths: List[str],
     eval_sampling_params: SamplingParams,
     output_path: str = "math12k_baseline_results.jsonl",
-) -> None:
+) -> float:
 
 
     print(f"Starting inference for {len(prompts)} examples...")
@@ -47,6 +47,7 @@ def evaluate_vllm(
         for entry in results:
             f.write(json.dumps(entry) + "\n")
     print(f"Results saved to {output_path}")
+    return avg_accuracy
 
 
 if __name__ == "__main__":
